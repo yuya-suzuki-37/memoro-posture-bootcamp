@@ -1,0 +1,508 @@
+// ===================================================================
+// POSTURE ANALYZER (evidence-based v2)
+// MediaPipe Pose Landmarker の33ランドマークから臨床アングル/逸脱を計算
+// 基準値の根拠は posture-tool/_knowledge/ を参照。
+//
+// 🔴 重要な前提（_knowledge/00-実装サマリ.md より）:
+//   - 本ツールは「診断」ではなく「スクリーニング」。
+//   - C7・大転子・ASIS/PSIS はMediaPipeに無いため近似（CALIB定数で調整）。
+//   - 写真2枚で妥当に測れるのは CVA・HKA(膝)・左右差・スウェイバック代理のみ。
+//     骨盤前後傾は相対判定、足首背屈は写真不可（問診/セルフチェックへ）。
+// ===================================================================
+
+// MediaPipe Pose のランドマーク index (33点)
+const LM = {
+  NOSE:0, LEFT_EYE_INNER:1, LEFT_EYE:2, LEFT_EYE_OUTER:3,
+  RIGHT_EYE_INNER:4, RIGHT_EYE:5, RIGHT_EYE_OUTER:6,
+  LEFT_EAR:7, RIGHT_EAR:8,
+  MOUTH_LEFT:9, MOUTH_RIGHT:10,
+  LEFT_SHOULDER:11, RIGHT_SHOULDER:12,
+  LEFT_ELBOW:13, RIGHT_ELBOW:14,
+  LEFT_WRIST:15, RIGHT_WRIST:16,
+  LEFT_PINKY:17, RIGHT_PINKY:18,
+  LEFT_INDEX:19, RIGHT_INDEX:20,
+  LEFT_THUMB:21, RIGHT_THUMB:22,
+  LEFT_HIP:23, RIGHT_HIP:24,
+  LEFT_KNEE:25, RIGHT_KNEE:26,
+  LEFT_ANKLE:27, RIGHT_ANKLE:28,
+  LEFT_HEEL:29, RIGHT_HEEL:30,
+  LEFT_FOOT_INDEX:31, RIGHT_FOOT_INDEX:32,
+};
+
+// ===== キャリブレーション定数（実データで要調整）=====
+// C7はMediaPipeに無いため肩(acromion)から推定する。POSTERIORを上げると
+// 「正常」のCVAが下がる。初期値は正常立位でCVA≈58-60°になるよう設定。
+const CALIB = {
+  C7_POSTERIOR: 0.60,  // C7を肩より後方へ neckH×この値 ずらす
+  KNEE_GREY_DEG: 6,    // 膝のフロンタル偏位 これ未満は正常（HKA ±誤差吸収）
+};
+
+const SCREENING_DISCLAIMER =
+  'この結果は写真からの姿勢スクリーニングであり、医学的診断ではありません。' +
+  '気になる症状や強い左右差がある場合は専門家（整形外科等）にご相談ください。';
+
+// ========== UTILS ==========
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function mid(a,b){ return { x:(a.x+b.x)/2, y:(a.y+b.y)/2, visibility:Math.min(a.visibility||1,b.visibility||1) }; }
+function tilt(a,b){
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return Math.atan2(dx, -dy) * 180 / Math.PI; // 真上方向を0度に
+}
+function angle3(a,b,c){
+  const ab = { x:a.x-b.x, y:a.y-b.y };
+  const cb = { x:c.x-b.x, y:c.y-b.y };
+  const dot = ab.x*cb.x + ab.y*cb.y;
+  const mag = Math.hypot(ab.x,ab.y) * Math.hypot(cb.x,cb.y);
+  return Math.acos(Math.min(1,Math.max(-1, dot/mag))) * 180 / Math.PI;
+}
+function horizAngleDeg(a,b){
+  return Math.atan2(b.y-a.y, b.x-a.x) * 180 / Math.PI; // 線の向き（-180〜180）
+}
+// 水平線の点対は ±180° 付近に出るため、水平からのズレ（-90〜90・符号付き）に畳む
+function foldTilt(deg){
+  if (deg > 90) deg -= 180;
+  else if (deg < -90) deg += 180;
+  return deg;
+}
+
+// ========== SIDE VIEW (横向き写真) ==========
+function detectSideFacing(lms){
+  const lEar = lms[LM.LEFT_EAR], rEar = lms[LM.RIGHT_EAR];
+  if ((lEar?.visibility||0) > (rEar?.visibility||0)) return 'left';
+  return 'right';
+}
+
+function analyzeSide(lms, aspect = 1){
+  const facing = detectSideFacing(lms);
+  const earKey = facing==='left' ? LM.LEFT_EAR : LM.RIGHT_EAR;
+  const shKey  = facing==='left' ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER;
+  const hipKey = facing==='left' ? LM.LEFT_HIP : LM.RIGHT_HIP;
+  const kneeKey= facing==='left' ? LM.LEFT_KNEE : LM.RIGHT_KNEE;
+  const ankKey = facing==='left' ? LM.LEFT_ANKLE : LM.RIGHT_ANKLE;
+  const elbowKey = facing==='left' ? LM.LEFT_ELBOW : LM.RIGHT_ELBOW;
+
+  const earO   = lms[earKey];
+  const shO    = lms[shKey];
+  const hipO   = lms[hipKey];
+  const kneeO  = lms[kneeKey];
+  const ankO   = lms[ankKey];
+  // 🔴 アスペクト補正: MediaPipeのx,yは画像の幅/高さで別々に正規化されるため、
+  //   縦長写真だと x が相対的に伸び、角度・比率が歪む（頭前傾/巻き肩=過大・左右差=過小）。
+  //   x に aspect(=W/H) を掛け x,y を同一スケールに揃えてから計測する。描画用は元座標(O)を返す。
+  const ac = (p) => ({ x: p.x * aspect, y: p.y, visibility: p.visibility });
+  const ear = ac(earO), sh = ac(shO), hip = ac(hipO), knee = ac(kneeO), ankle = ac(ankO);
+
+  const trunkLen = dist(sh, hip) || 1e-6;
+  // 前方(顔の向き)を正とするx方向の符号
+  const forwardDir = facing==='left' ? -1 : 1;
+
+  // === 1. 推定CVA（頭頸角）— _knowledge/01 ===
+  // 真のCVAは C7頂点・水平基準・C7→耳珠。C7を肩から後方推定して近似。
+  // 値が小さいほど頭部前方位（<50°=FHP）。
+  const neckH = Math.abs(ear.y - sh.y) || 1e-6;
+  const earFwd = forwardDir * (ear.x - sh.x);        // 耳が前方なら正
+  const cvaRun = Math.abs(earFwd + CALIB.C7_POSTERIOR * neckH); // C7→耳の水平距離
+  const cva = Math.atan2(neckH, cvaRun) * 180 / Math.PI;
+  // 旧指標も互換のため残す（耳-肩の垂直からの傾き）
+  const fhAngle = Math.atan2(Math.abs(earFwd), neckH) * 180 / Math.PI;
+
+  // === 2. 巻き肩（肩の前方シフト）— _knowledge/02 ===
+  // ★プラムライン(足首の垂直線)基準に変更。上半身ごと前へ出ている人でも
+  //   巻き肩を取りこぼさないように、肩が足首よりどれだけ前かを主指標にする。
+  //   （旧: 肩vs骨盤 は上半身が丸ごと前傾すると差が出ず過小評価だった）
+  const shOffsetHip = forwardDir * (sh.x - hip.x);   // 肩が骨盤より前なら正（参考）
+  const shOffsetAnkle = forwardDir * (sh.x - ankle.x); // 肩が足首より前なら正（主指標）
+  const rsRatio = shOffsetAnkle / trunkLen;          // プラムライン基準の前方シフト比
+  const rsRatioHip = shOffsetHip / trunkLen;         // 旧指標（参考保持）
+  const rsAngle = Math.atan2(Math.abs(shOffsetHip), Math.abs(sh.y - hip.y)) * 180 / Math.PI;
+
+  // === 3. 骨盤前後傾（相対推定）— _knowledge/04 ===
+  // ASIS/PSIS不可のため相対推定。絶対角は断定しない。
+  const thighTilt = horizAngleDeg(hip, knee);
+  const pelvicTilt = Math.abs(90 - Math.abs(thighTilt));
+  const pelvicHorizDiff = forwardDir * (hip.x - knee.x);
+  const pelvicForward = pelvicHorizDiff > 0;
+
+  // === 4. 膝（立位）
+  const kneeAngle = angle3(hip, knee, ankle);
+  const kneeFlex = 180 - kneeAngle;
+
+  // === 5. スウェイバック代理 — _knowledge/05 ===
+  // hipがankleより前方 AND 肩がhipより後方。
+  const hipFwdOfAnkle = forwardDir * (hip.x - ankle.x) / trunkLen; // 正=骨盤前方
+  const shoulderBehindHip = forwardDir * (hip.x - sh.x) / trunkLen; // 正=肩が骨盤より後方
+
+  // === 6. Plumb Line 逸脱
+  const refX = ankle.x;
+  const plumbDev = {
+    ear:   Math.abs(ear.x - refX) / trunkLen,
+    shoulder: Math.abs(sh.x - refX) / trunkLen,
+    hip:   Math.abs(hip.x - refX) / trunkLen,
+    knee:  Math.abs(knee.x - refX) / trunkLen,
+  };
+
+  return {
+    facing,
+    landmarks: { ear:earO, shoulder:shO, hip:hipO, knee:kneeO, ankle:ankO, elbow: lms[elbowKey] },
+    metrics: {
+      cva,
+      forwardHeadAngle: fhAngle,
+      roundedShoulderRatio: rsRatio,
+      roundedShoulderRatioHip: rsRatioHip,
+      roundedShoulderAngle: rsAngle,
+      pelvicTiltAngle: pelvicTilt,
+      pelvicForward,
+      kneeFlex,
+      hipFwdOfAnkle,
+      shoulderBehindHip,
+      plumbDev,
+    }
+  };
+}
+
+// ========== FRONT VIEW ==========
+function analyzeFront(lms, aspect = 1){
+  const lShO = lms[LM.LEFT_SHOULDER], rShO = lms[LM.RIGHT_SHOULDER];
+  const lHipO = lms[LM.LEFT_HIP], rHipO = lms[LM.RIGHT_HIP];
+  const lKneeO = lms[LM.LEFT_KNEE], rKneeO = lms[LM.RIGHT_KNEE];
+  const lAnkO = lms[LM.LEFT_ANKLE], rAnkO = lms[LM.RIGHT_ANKLE];
+  const lEarO = lms[LM.LEFT_EAR], rEarO = lms[LM.RIGHT_EAR];
+  // 🔴 アスペクト補正（analyzeSideと同じ。左右差の角度が縦横比で潰れるのを是正）
+  const ac = (p) => ({ x: p.x * aspect, y: p.y, visibility: p.visibility });
+  const lSh = ac(lShO), rSh = ac(rShO), lHip = ac(lHipO), rHip = ac(rHipO),
+        lKnee = ac(lKneeO), rKnee = ac(rKneeO), lAnk = ac(lAnkO), rAnk = ac(rAnkO),
+        lEar = ac(lEarO), rEar = ac(rEarO);
+
+  const shoulderWidth = dist(lSh, rSh) || 1e-6;
+  const trunkH = dist(mid(lSh,rSh), mid(lHip,rHip));
+
+  // 左右差（度）— _knowledge/09
+  // horizAngleDeg は線の向きなので、水平の点対は ±180° 付近に出る。
+  // foldTilt で「水平からのズレ（符号付き・約 -90〜90）」に正規化する。
+  // これをしないと肩/骨盤の左右差が 179° 等と出て誤検出になる。
+  const shoulderTilt = foldTilt(horizAngleDeg(lSh, rSh));
+  const pelvicTilt = foldTilt(horizAngleDeg(lHip, rHip));
+  const headTilt = foldTilt(horizAngleDeg(lEar, rEar));
+
+  // 膝のフロンタル偏位（HKA近似）— _knowledge/07
+  // dev = 180 - angle3(hip,knee,ankle)。方向は膝が hip-ankle 線の内/外どちらか。
+  function kneeFrontal(hip,knee,ankle){
+    const dev = 180 - angle3(hip, knee, ankle);
+    const t = (knee.y - hip.y) / ((ankle.y - hip.y) || 1e-6);
+    const lineX = hip.x + t * (ankle.x - hip.x); // hip-ankle線上の、膝の高さでのx
+    return { dev, kneeOffLine: knee.x - lineX };
+  }
+  const lk = kneeFrontal(lHip, lKnee, lAnk);
+  const rk = kneeFrontal(rHip, rKnee, rAnk);
+  const midHipX = (lHip.x + rHip.x) / 2;
+  // 内側(midline向き)に入っていれば valgus(X)、外側なら varus(O)
+  const lKneeMedial = (midHipX - lKnee.x);   // 左膝: 正=内側へ
+  const rKneeMedial = (rKnee.x - midHipX);   // 右膝: 正=内側へ
+
+  const lateralScore =
+    Math.abs(shoulderTilt) * 0.4 +
+    Math.abs(pelvicTilt) * 0.4 +
+    Math.abs(headTilt) * 0.2;
+
+  return {
+    landmarks: { lSh:lShO, rSh:rShO, lHip:lHipO, rHip:rHipO, lKnee:lKneeO, rKnee:rKneeO, lAnk:lAnkO, rAnk:rAnkO, lEar:lEarO, rEar:rEarO },
+    metrics: {
+      shoulderTilt, pelvicTilt, headTilt,
+      lKneeDev: lk.dev, rKneeDev: rk.dev,
+      lKneeMedial, rKneeMedial,
+      lateralScore,
+      shoulderWidth, trunkH,
+    }
+  };
+}
+
+// ========== PROBLEM DETECTION（エビデンス基準）==========
+function detectProblems(sideRes, frontRes){
+  const problems = [];
+  const m = sideRes?.metrics || {};
+  const fm = frontRes?.metrics || null;
+
+  // 1. 頭部前方位 — _knowledge/01
+  // ★C7近似に依存するCVA(絶対角)は写真では信頼できないため使わない。
+  //   代わりに「耳が肩よりどれだけ前か＝首の前傾角」を主指標にする（近似不要）。
+  //   forwardHeadAngle が大きいほど頭が前に出ている。
+  if (m.forwardHeadAngle != null) {
+    const fh = m.forwardHeadAngle;
+    if (fh > 13) {
+      const severity = fh < 20 ? 'low' : fh < 28 ? 'mid' : 'high';
+      problems.push(buildProblem('forwardHead', '頭が前に出る傾向', severity, fh.toFixed(0)+'°前傾', fh));
+    }
+  }
+
+  // 2. 巻き肩（肩の前方シフト・プラムライン基準）— _knowledge/02
+  //    肩が足首の垂直線よりどれだけ前かで判定（上半身ごと前傾も拾える）。
+  if (m.roundedShoulderRatio != null && m.roundedShoulderRatio > 0.12) {
+    const r = m.roundedShoulderRatio;
+    const severity = r < 0.22 ? 'low' : r < 0.35 ? 'mid' : 'high';
+    problems.push(buildProblem('roundedShoulders', '肩が前に巻く傾向', severity, (r*100).toFixed(0)+'%前方', r));
+  }
+
+  // 3. 猫背傾向（胸椎後弯）— _knowledge/03（真の後弯は写真不可・頭の前傾から推定）
+  //    頭が強めに前へ出ている場合に併発しやすい猫背"傾向"として推定。
+  if (m.forwardHeadAngle != null && m.forwardHeadAngle > 20) {
+    const fh = m.forwardHeadAngle;
+    const severity = fh < 26 ? 'low' : fh < 32 ? 'mid' : 'high';
+    problems.push(buildProblem('thoracicKyphosis', '背中が丸まる傾向（猫背・推定）', severity, '推定', fh));
+  }
+
+  // 4. 骨盤前後傾（相対推定）— _knowledge/04（絶対角は断定しない）
+  if (m.pelvicForward && m.pelvicTiltAngle > 8){
+    const severity = m.pelvicTiltAngle < 12 ? 'low' : m.pelvicTiltAngle < 18 ? 'mid' : 'high';
+    problems.push(buildProblem('anteriorPelvicTilt', '骨盤前傾傾向（反り腰・相対推定）', severity, '前傾傾向', m.pelvicTiltAngle));
+  } else if (!m.pelvicForward && m.pelvicTiltAngle > 8){
+    const severity = m.pelvicTiltAngle < 12 ? 'low' : m.pelvicTiltAngle < 18 ? 'mid' : 'high';
+    problems.push(buildProblem('posteriorPelvicTilt', '骨盤後傾傾向（相対推定）', severity, '後傾傾向', m.pelvicTiltAngle));
+  }
+
+  // 5. スウェイバック代理 — _knowledge/05
+  if (m.hipFwdOfAnkle != null && m.hipFwdOfAnkle > 0.12 && m.shoulderBehindHip > 0.04) {
+    const v = m.hipFwdOfAnkle;
+    const severity = v < 0.2 ? 'low' : v < 0.3 ? 'mid' : 'high';
+    problems.push(buildProblem('swayBack', 'スウェイバック姿勢（推定）', severity, '骨盤前方＋上体後方', v));
+  }
+
+  // 6. 左右非対称（正面）— _knowledge/09（健常者でも差はある→広めの正常域）
+  if (fm) {
+    const sh = Math.abs(fm.shoulderTilt);
+    const pv = Math.abs(fm.pelvicTilt);
+    const hd = Math.abs(fm.headTilt);
+    // 肩 正常<3° / 骨盤(obliquity) 正常<5.6° / 頭部<5°
+    if (sh > 3 || pv > 5.6 || hd > 5) {
+      const ratio = Math.max(sh/3, pv/5.6, hd/5); // 正常上限に対する超過率
+      const severity = ratio < 1.7 ? 'low' : ratio < 2.6 ? 'mid' : 'high';
+      const worst = Math.max(sh, pv, hd);
+      problems.push(buildProblem('lateralAsymmetry', '左右非対称', severity, worst.toFixed(1)+'°', worst));
+    }
+
+    // 7. 膝アライメント（HKA近似）— _knowledge/07（±グレーゾーンで誤検出減）
+    const grey = CALIB.KNEE_GREY_DEG;
+    const lVal = fm.lKneeDev > grey && fm.lKneeMedial > 0;
+    const rVal = fm.rKneeDev > grey && fm.rKneeMedial > 0;
+    const lVar = fm.lKneeDev > grey && fm.lKneeMedial < 0;
+    const rVar = fm.rKneeDev > grey && fm.rKneeMedial < 0;
+    if (lVal || rVal) {
+      const v = Math.max(fm.lKneeDev, fm.rKneeDev);
+      const severity = v < 10 ? 'low' : v < 15 ? 'mid' : 'high';
+      problems.push(buildProblem('kneeValgus', 'X脚傾向（膝の内向き）', severity, v.toFixed(1)+'°', v));
+    } else if (lVar || rVar) {
+      const v = Math.max(fm.lKneeDev, fm.rKneeDev);
+      const severity = v < 10 ? 'low' : v < 15 ? 'mid' : 'high';
+      problems.push(buildProblem('kneeVarus', 'O脚傾向（膝の外向き）', severity, v.toFixed(1)+'°', v));
+    }
+
+    // 8. 側弯傾向（スクリーニングのみ）— _knowledge/06
+    // 肩と骨盤の傾きが逆方向（Cカーブ代償）かつ「はっきり大きい」時だけ。
+    // 健康な人を脅かさないよう閾値を高めに設定（軽い左右差では出さない）。
+    if (Math.abs(fm.shoulderTilt) > 5 && Math.abs(fm.pelvicTilt) > 8
+        && Math.sign(fm.shoulderTilt) !== Math.sign(fm.pelvicTilt)) {
+      const v = (Math.abs(fm.shoulderTilt) + Math.abs(fm.pelvicTilt)) / 2;
+      problems.push(buildProblem('scoliosis', '左右差が大きめ', 'mid', v.toFixed(1)+'°', v));
+    }
+  }
+
+  // ※ 足首背屈制限(ankleStiffness)は静止写真では測定不可のため自動検出しない。
+  //   → 問診/セルフチェック（膝-壁テスト）で扱う（_knowledge/08）。
+
+  if (problems.length === 0) {
+    problems.push({
+      key:'general', severity:'low', title:'全体的に良好な姿勢',
+      description:'明確な逸脱は検出されませんでした。さらに磨きをかける軽い維持メニューを提案します。',
+      metric:'OK', tissues:{ tight:[], weak:[] },
+    });
+  }
+
+  return problems;
+}
+
+const PROBLEM_TEMPLATES = {
+  forwardHead: {
+    description:'頭が肩より前方に位置する状態。長時間のスマホ・PC使用が主原因で、首の負担が大きく、眼精疲労・頭痛・肩こりの根本原因になりやすい。',
+    tissues:{ tight:['上部僧帽筋','肩甲挙筋','胸鎖乳突筋','後頭下筋群','頸半棘筋'], weak:['深部頸屈筋(頸長筋/頭長筋)','下部僧帽筋','前鋸筋'] },
+  },
+  roundedShoulders: {
+    description:'肩が前方に巻き込まれた状態。胸郭の動きを制限し呼吸を浅くします。胸郭出口症候群・肩インピンジメントの一因にも。',
+    tissues:{ tight:['大胸筋','小胸筋','烏口腕筋','広背筋上部','肩甲下筋'], weak:['菱形筋','下部僧帽筋','棘下筋','小円筋','前鋸筋'] },
+  },
+  thoracicKyphosis: {
+    description:'胸椎が過度に後弯した猫背"傾向"。写真からは直接測れないため、頭部前方位から推定した参考所見です。',
+    tissues:{ tight:['脊柱起立筋(下部胸椎)','大胸筋','小胸筋','腹直筋上部'], weak:['脊柱起立筋(上部胸椎)','下部僧帽筋','菱形筋','多裂筋'] },
+  },
+  anteriorPelvicTilt: {
+    description:'骨盤が前に傾き腰椎が反った状態(反り腰)の傾向。腸腰筋短縮と臀筋弱化のコンビネーション。※写真からの相対推定です。',
+    tissues:{ tight:['腸腰筋(腸骨筋/大腰筋)','大腿直筋','脊柱起立筋(腰部)','大腿筋膜張筋','腰方形筋'], weak:['大臀筋','腹直筋','腹横筋','ハムストリングス'] },
+  },
+  posteriorPelvicTilt: {
+    description:'骨盤が後ろに傾き腰椎の生理的湾曲が失われた傾向。長時間座位で多発。※写真からの相対推定です。',
+    tissues:{ tight:['ハムストリングス','腹直筋','大臀筋(上部繊維)'], weak:['腸腰筋','脊柱起立筋(腰部)','多裂筋'] },
+  },
+  swayBack: {
+    description:'骨盤が前方にシフトし上半身が後ろに倒れる代償姿勢。関節包と靱帯に負担がかかりやすいパターン。',
+    tissues:{ tight:['ハムストリングス','腹直筋上部','広背筋'], weak:['腸腰筋','腹斜筋','下部脊柱起立筋','多裂筋'] },
+  },
+  lateralAsymmetry: {
+    description:'肩や骨盤の左右の高さに差がある状態。なお健常者でも軽度の左右差はよくあります。極端な差が続く場合は要注意。',
+    tissues:{ tight:['腰方形筋(高い側)','広背筋(高い側)','中臀筋(低い側)'], weak:['腰方形筋(低い側)','中臀筋(高い側)','腹斜筋(反対側)'] },
+  },
+  kneeValgus: {
+    description:'膝が内側に入る傾向(X脚)。中臀筋・深層外旋六筋の機能不全が一因。膝痛・偏平足への連鎖に注意。',
+    tissues:{ tight:['内転筋群','大腿筋膜張筋','腓腹筋(内側頭)'], weak:['中臀筋','深層外旋六筋','大臀筋(下部繊維)','後脛骨筋'] },
+  },
+  kneeVarus: {
+    description:'O脚(膝が外側に開く)傾向。中臀筋・内側広筋・内転筋下部の機能不全、外側組織の過緊張が一因。',
+    tissues:{ tight:['大腿筋膜張筋','腸脛靱帯','外側ハムストリングス','腓骨筋','梨状筋'], weak:['内転筋群下部','内側広筋','中臀筋後部繊維','内側ハムストリングス','後脛骨筋'] },
+  },
+  scoliosis: {
+    description:'脊柱の左右への弯曲傾向（機能性側弯の可能性）。写真では確定できません。気になる場合は整形外科での評価を推奨します。',
+    tissues:{ tight:['凸側 腰方形筋','凸側 広背筋','凸側 腹斜筋','凸側 腸腰筋'], weak:['凹側 腰方形筋','凹側 腹斜筋','凹側 中臀筋','凹側 多裂筋'] },
+  },
+  ankleStiffness: {
+    description:'足首の背屈可動域制限。※静止写真では測定できないため、セルフチェック（膝-壁テスト）で確認します。',
+    tissues:{ tight:['腓腹筋','ヒラメ筋','後脛骨筋','足底筋膜'], weak:['前脛骨筋','長腓骨筋'] },
+  },
+};
+
+function buildProblem(key, title, severity, metricStr, rawValue){
+  const tpl = PROBLEM_TEMPLATES[key] || {};
+  return {
+    key, severity, title,
+    description: tpl.description || '',
+    tissues: tpl.tissues || { tight:[], weak:[] },
+    metric: metricStr,
+    rawValue,
+  };
+}
+
+// ========== POSTURE TYPE ==========
+function determinePostureType(problems){
+  const keys = problems.map(p=>p.key);
+  const hasFH = keys.includes('forwardHead');
+  const hasRS = keys.includes('roundedShoulders');
+  const hasTK = keys.includes('thoracicKyphosis');
+  const hasAPT = keys.includes('anteriorPelvicTilt');
+  const hasSway = keys.includes('swayBack');
+  const hasAsym = keys.includes('lateralAsymmetry');
+  const hasKV = keys.includes('kneeValgus');
+
+  if (hasFH && (hasRS || hasTK)) {
+    // 巻き肩(RS)が実際に検出されているかで名前を変える（無いのに「巻き肩」と言わない）
+    const frontWord = hasRS ? '巻き肩' : '猫背';
+    if (hasAPT) {
+      return { name:`${frontWord}＋反り腰タイプ`,
+        desc:'頭が前に出て背中が丸まり、さらに腰が反りやすい“複合タイプ”。スマホ・デスクワークの多い方に一番多いパターンです。胸まわりをほぐし、体幹を目覚めさせるのが近道。',
+        tags:[frontWord, '頭が前', '反り腰'] };
+    }
+    return { name:'頭が前・猫背タイプ',
+      desc:'頭が前に出て、背中が丸まりやすいパターン。スマホやPCの時間が長い方に多い“現代型”。首まわりと胸を開くケアで印象が変わりやすい部分です。',
+      tags: hasRS ? ['巻き肩','猫背ぎみ','頭が前'] : ['猫背ぎみ','頭が前'] };
+  }
+  if (hasAPT) {
+    return { name:'反り腰タイプ',
+      desc:'骨盤が前に傾き、腰が反りやすいパターン。太もも前や腰が張りやすく、下腹が前に出て見えやすい傾向です。お尻・お腹を使えるようにするのが鍵。',
+      tags:['反り腰','骨盤が前に'] };
+  }
+  if (hasSway) {
+    return { name:'重心うしろ立ちタイプ',
+      desc:'骨盤を前に押し出して、上半身が少し後ろに倒れる“ラクな立ち方”。一見まっすぐでも疲れやすく、横からの立ち姿がだらっと見えやすいパターンです。',
+      tags:['スウェイバック','重心うしろ'] };
+  }
+  if (hasAsym || hasKV) {
+    return { name:'左右バランスタイプ',
+      desc:'肩・骨盤・脚のどこかに左右差が見られるパターン。カバンをいつも同じ肩に、片脚重心で立つ、といった生活のクセが関わることが多いです。',
+      tags:['左右差','生活グセ'] };
+  }
+  if (hasTK || hasRS){
+    return { name:'ゆる猫背タイプ',
+      desc:'背中がやや丸まり、肩まわりの支えが少しゆるんだ傾向。まだ軽めなので、早めのケアで十分に整えやすい状態です。',
+      tags:['猫背ぎみ','軽め'] };
+  }
+  return { name:'美姿勢タイプ', desc:'大きな崩れは見つかりませんでした。この状態をキープしながら、写真映えする“花嫁姿勢”へさらに磨きをかけていきましょう。', tags:['バランス良好'] };
+}
+
+// ========== SCORE ==========
+function calcScore(sideRes, frontRes, problems){
+  let score = 100;
+  problems.forEach(p => {
+    if (p.severity === 'low')  score -= 4;
+    if (p.severity === 'mid')  score -= 9;
+    if (p.severity === 'high') score -= 16;
+  });
+  return Math.max(35, Math.min(100, score));
+}
+
+function gradeFromScore(s){
+  if (s >= 92) return { grade:'EXCELLENT', desc:'とてもきれいな立ち姿。この状態をキープしていきましょう。' };
+  if (s >= 82) return { grade:'GOOD',      desc:'バランスの良い立ち姿。ちょっとした習慣でさらに磨けます。' };
+  if (s >= 70) return { grade:'FAIR',      desc:'気になるポイントがいくつか。毎日のケアで少しずつ変えていけます。' };
+  if (s >= 58) return { grade:'CARE',      desc:'いくつかのクセが見られます。まずはできることから整えていきましょう。' };
+  return         { grade:'CARE',           desc:'複数のクセが見られます。気になる点は無理なくケアしていきましょう。' };
+}
+
+// ========== METRICS DISPLAY ==========
+function buildMetricsList(sideRes, frontRes){
+  const list = [];
+  const m = sideRes?.metrics;
+  const fm = frontRes?.metrics;
+
+  if (m && m.forwardHeadAngle != null) {
+    const fh = m.forwardHeadAngle;
+    list.push({
+      name:'頭の前傾（耳と肩のズレ）',
+      value: fh.toFixed(0) + '°',
+      detail:'耳が肩よりどれだけ前に出ているか。小さいほど良い（目安：13°未満）',
+      pct: Math.min(100, fh / 35 * 100),
+      sev: fh < 13 ? 'good' : fh < 20 ? 'warn' : 'bad',
+    });
+    list.push({
+      name:'肩の前方シフト',
+      value: (m.roundedShoulderRatio*100).toFixed(0) + '%',
+      detail:'足首の垂直線に対して肩がどれだけ前に出ているか（巻き肩の目安）。小さいほど良い',
+      pct: Math.min(100, m.roundedShoulderRatio * 250),
+      sev: m.roundedShoulderRatio < 0.12 ? 'good' : m.roundedShoulderRatio < 0.22 ? 'warn' : 'bad',
+    });
+  }
+  if (fm) {
+    list.push({
+      name:'肩の高さ左右差',
+      value: Math.abs(fm.shoulderTilt).toFixed(1) + '°',
+      detail:'正常<3°（健常者でも軽度差はよくあります）',
+      pct: Math.min(100, Math.abs(fm.shoulderTilt) / 8 * 100),
+      sev: Math.abs(fm.shoulderTilt) < 3 ? 'good' : Math.abs(fm.shoulderTilt) < 5 ? 'warn' : 'bad',
+    });
+    list.push({
+      name:'骨盤の高さ左右差',
+      value: Math.abs(fm.pelvicTilt).toFixed(1) + '°',
+      detail:'正常<5.6°（健常者の95%が収まる範囲）',
+      pct: Math.min(100, Math.abs(fm.pelvicTilt) / 10 * 100),
+      sev: Math.abs(fm.pelvicTilt) < 5.6 ? 'good' : Math.abs(fm.pelvicTilt) < 8 ? 'warn' : 'bad',
+    });
+    const kneeDev = Math.max(fm.lKneeDev || 0, fm.rKneeDev || 0);
+    list.push({
+      name:'膝アライメント（HKA偏位）',
+      value: kneeDev.toFixed(1) + '°',
+      detail:'正常はほぼ直線。約6°以上でX脚/O脚傾向',
+      pct: Math.min(100, kneeDev / 20 * 100),
+      sev: kneeDev < CALIB.KNEE_GREY_DEG ? 'good' : kneeDev < 12 ? 'warn' : 'bad',
+    });
+  }
+
+  return list;
+}
+
+export {
+  LM,
+  CALIB,
+  SCREENING_DISCLAIMER,
+  analyzeSide,
+  analyzeFront,
+  detectProblems,
+  determinePostureType,
+  calcScore,
+  gradeFromScore,
+  buildMetricsList,
+};

@@ -1,0 +1,138 @@
+/* =================================================================
+   30-DAY PROGRAM UI — Memoro デザイン（アイボリー×シャンパンゴールド）
+   既存 styles.css は変更せず、本ファイルで完結させる。
+   ================================================================= */
+
+/* =================================================================
+   ブートキャンプ識別バナー（どの30日ブートキャンプかを一目で示す）
+   ※ 5種のブートキャンプで使い回せる共通パーツ。アイコンと〇〇（差別化ワード）だけ差し替え。
+      命名規則: 「30日間〇〇ブートキャンプ」（〇〇を <b> でゴールド強調）
+      例) 🧍‍♀️30日間姿勢改善 / 🔥30日間脂肪燃焼 / 🧘‍♀️30日間ヨガ / 🌿30日間ピラティス / ✨30日間小顔（＋ブートキャンプ）
+   ================================================================= */
+.bc-banner{
+  text-align:center;
+  background:linear-gradient(180deg,#FBF3E6,#FFFDFA);
+  border-bottom:1px solid #E7DED2;
+  padding:13px 20px 15px;
+}
+.bc-banner .bc-eyebrow{
+  display:block;
+  font-family:"Zen Kaku Gothic New",sans-serif;
+  font-size:10px; letter-spacing:.34em; font-weight:700;
+  color:#9A794F; margin-bottom:6px;
+}
+.bc-banner .bc-title{
+  font-family:"Shippori Mincho",serif; font-weight:700;
+  font-size:clamp(1.05rem,3.6vw,1.25rem); letter-spacing:.1em; color:#33302B;
+}
+.bc-banner .bc-title .bc-ico{ margin-right:.4em; font-weight:400; }
+.bc-banner .bc-title b{ color:#B4936A; font-weight:700; }
+
+/* ---------- Before/After（再診断のスコア比較） ---------- */
+.before-after{
+  margin:22px 0 6px; padding:20px 22px; text-align:center;
+  background:linear-gradient(135deg,#FFFDFA,#F5EEE3);
+  border:1px solid #E7DED2; border-radius:18px;
+}
+.before-after .ba-kicker{
+  font-family:"Zen Kaku Gothic New",sans-serif; font-size:10px; letter-spacing:.28em;
+  color:#9A794F; font-weight:700; margin-bottom:12px;
+}
+.before-after .ba-row{ display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; }
+.before-after .ba-cell{ display:flex; flex-direction:column; align-items:center; gap:3px; }
+.before-after .ba-when{ font-family:"Zen Kaku Gothic New",sans-serif; font-size:11px; color:#9A8F80; letter-spacing:.06em; }
+.before-after .ba-score{ font-family:"Shippori Mincho",serif; font-size:34px; font-weight:700; line-height:1; color:#8A8172; }
+.before-after .ba-cell.now .ba-score{ color:#33302B; }
+.before-after .ba-arrow{ font-size:20px; color:#C9B79A; }
+.before-after .ba-diff{ display:flex; align-items:baseline; gap:2px; margin-left:6px; font-family:"Shippori Mincho",serif; }
+.before-after .ba-diff b{ font-size:24px; font-weight:700; }
+.before-after .ba-diff small{ font-size:12px; }
+.before-after .ba-diff.up{ color:#6E8F70; }
+.before-after .ba-diff.down{ color:#C58274; }
+.before-after .ba-diff.flat{ color:#9A8F80; }
+.before-after .ba-note{ font-family:"Zen Kaku Gothic New",sans-serif; font-size:12px; color:#6B645B; margin-top:12px; line-height:1.7; }
+
+.p30-reco{
+  background:linear-gradient(135deg,#FFFDFA,#F5EEE3);
+  border:1px solid #E7DED2; border-radius:18px;
+  padding:22px 24px; margin:22px 0 8px;
+}
+.p30-reco-kicker{
+  font-family:"Zen Kaku Gothic New",sans-serif; font-size:11px; letter-spacing:.18em;
+  color:#9A794F; font-weight:700;
+}
+.p30-reco-body{ display:flex; align-items:center; gap:16px; margin-top:12px; }
+.p30-reco-icon{ font-size:34px; line-height:1; }
+.p30-reco-name{ font-family:"Shippori Mincho",serif; font-size:20px; color:#33302B; font-weight:600; }
+.p30-reco-desc{ font-size:13px; color:#6B645B; margin-top:3px; line-height:1.6; }
+.p30-reco-note{ font-size:11.5px; color:#A79A88; margin:12px 0 0; line-height:1.7; }
+
+/* Phase タブ */
+.p30-phases{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:24px 0 14px; }
+.p30-phase-tab{
+  display:flex; flex-direction:column; gap:3px; align-items:flex-start; text-align:left;
+  background:#fff; border:1px solid #E7DED2; border-radius:14px;
+  padding:14px; cursor:pointer; transition:.2s;
+}
+.p30-phase-tab:hover{ border-color:#CDB18A; }
+.p30-phase-tab.active{ background:#33302B; border-color:#33302B; }
+.p30-phase-tab.active .pt-en{ color:#D8B98A; }
+.p30-phase-tab.active .pt-ja,
+.p30-phase-tab.active .pt-days{ color:#F3ECE3; }
+.pt-en{ font-family:"Zen Kaku Gothic New",sans-serif; font-size:10px; letter-spacing:.16em; color:#B4936A; font-weight:700; }
+.pt-ja{ font-family:"Shippori Mincho",serif; font-size:15px; color:#33302B; font-weight:600; }
+.pt-days{ font-size:11px; color:#9A897A; }
+
+.p30-phase-desc{ font-size:13px; color:#6B645B; margin:0 2px 16px; line-height:1.7; }
+
+/* Day カレンダー */
+.p30-days{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+@media(min-width:600px){ .p30-days{ grid-template-columns:repeat(5,1fr); } }
+.p30-day{
+  position:relative; display:flex; flex-direction:column; gap:4px; text-align:left;
+  background:#fff; border:1px solid #EAE1D4; border-radius:14px; padding:13px 13px 15px;
+  cursor:pointer; transition:.18s;
+}
+.p30-day:hover{ border-color:#B4936A; transform:translateY(-1px); box-shadow:0 6px 18px rgba(180,147,106,.14); }
+.p30-day.rest{ background:#FAF6F0; border-style:dashed; }
+.p30-day-badge{
+  font-family:"Zen Kaku Gothic New",sans-serif; font-size:9.5px; letter-spacing:.14em;
+  color:#B4936A; font-weight:700;
+}
+.p30-day.rest .p30-day-badge{ color:#B3A084; }
+.p30-day-num{ font-family:"Shippori Mincho",serif; font-size:24px; line-height:1; color:#33302B; font-weight:600; }
+.p30-day-theme{ font-size:12px; color:#4A453E; font-weight:500; margin-top:2px; line-height:1.4; }
+.p30-day-items{ font-size:10.5px; color:#9A897A; line-height:1.5; margin-top:2px; }
+
+/* Day 詳細 */
+.p30-detail{
+  margin-top:18px; background:#fff; border:1px solid #E7DED2; border-radius:18px; padding:20px;
+}
+.p30-detail-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:16px; }
+.p30-detail-kicker{ font-family:"Zen Kaku Gothic New",sans-serif; font-size:10.5px; letter-spacing:.16em; color:#B4936A; font-weight:700; }
+.p30-detail-head h3{ font-family:"Shippori Mincho",serif; font-size:21px; color:#33302B; margin:4px 0 0; font-weight:600; }
+.p30-detail-close{ background:#F3ECE3; border:none; width:32px; height:32px; border-radius:50%; font-size:18px; color:#6B645B; cursor:pointer; flex:none; line-height:1; }
+.p30-rest-note{ font-size:13px; color:#6B645B; line-height:1.8; margin:0 0 4px; }
+
+.p30-ex-list{ display:grid; gap:14px; }
+.p30-ex{ display:flex; gap:14px; border:1px solid #EDE5D8; border-radius:14px; padding:14px; background:#FFFDFA; }
+.p30-ex.self{ border-left:3px solid #8AA98C; }
+.p30-ex.train{ border-left:3px solid #C58274; }
+.p30-ex-illust{ flex:none; width:84px; height:84px; }
+.p30-ex-illust svg{ width:100% !important; height:100% !important; display:block; }
+.p30-ex-body{ flex:1; min-width:0; }
+.p30-ex-cat{ display:inline-block; font-family:"Zen Kaku Gothic New",sans-serif; font-size:10px; letter-spacing:.08em; color:#9A794F; background:#F3ECE3; padding:2px 9px; border-radius:20px; }
+.p30-ex-body h4{ font-family:"Shippori Mincho",serif; font-size:16px; color:#33302B; margin:7px 0 5px; font-weight:600; }
+.p30-ex-meta{ display:flex; gap:14px; font-size:11.5px; color:#9A897A; margin-bottom:6px; }
+.p30-ex-purpose{ font-size:12.5px; color:#5A544C; line-height:1.65; margin:0 0 8px; }
+.p30-ex-how{ font-size:12px; color:#5A544C; line-height:1.7; margin:0 0 8px; padding-left:18px; }
+.p30-ex-how li{ margin-bottom:2px; }
+.p30-ex-cues{ display:flex; flex-direction:column; gap:3px; font-size:11.5px; }
+.p30-ex-cues .do{ color:#6E8A70; }
+.p30-ex-cues .dont{ color:#B5766A; }
+
+@media(max-width:480px){
+  .p30-phases{ grid-template-columns:1fr; }
+  .p30-ex{ flex-direction:column; }
+  .p30-ex-illust{ width:70px; height:70px; }
+}
