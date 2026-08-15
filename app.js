@@ -120,6 +120,7 @@ els.btn.addEventListener('click', async ()=>{
     const res = await runDiagnosis({ front:state.front, side:state.side }, showLoader);
     hideLoader();
     if (!res.ok){ alert(res.message || '解析に失敗しました。'); return; }
+    await runAnalyzing();
     renderResult(res);
   } catch(err){
     hideLoader();
@@ -127,6 +128,31 @@ els.btn.addEventListener('click', async ()=>{
     alert('解析中にエラーが発生しました。写真を変えてお試しください。');
   }
 });
+
+// ===================================================================
+// 解析演出（進捗リング＋項目チェック・小顔と統一）
+// ===================================================================
+function runAnalyzing(){
+  return new Promise(resolve => {
+    const items = ['姿勢全体のバランス', '肩の高さ・傾き', '猫背・巻き肩', '骨盤の傾き', '首の位置'];
+    const ov = document.createElement('div');
+    ov.className = 'analyzing-ov';
+    ov.innerHTML = `
+      <div class="az-card">
+        <div class="az-ring"><svg viewBox="0 0 80 80"><circle class="az-track" cx="40" cy="40" r="34"/><circle class="az-prog" cx="40" cy="40" r="34"/></svg><span class="az-pct">0%</span></div>
+        <p class="az-title">あなたの姿勢を解析しています</p>
+        <ul class="az-list">${items.map((t) => `<li><span class="az-check"></span>${t}</li>`).join('')}</ul>
+      </div>`;
+    document.body.appendChild(ov);
+    requestAnimationFrame(() => ov.classList.add('in'));
+    const lis = ov.querySelectorAll('.az-list li');
+    lis.forEach((li, i) => setTimeout(() => li.classList.add('done'), 380 + i * 330));
+    const pctEl = ov.querySelector('.az-pct'), progEl = ov.querySelector('.az-prog');
+    let p = 0;
+    const tick = setInterval(() => { p = Math.min(100, p + 2); pctEl.textContent = p + '%'; progEl.style.strokeDashoffset = String(214 * (1 - p / 100)); if (p >= 100) clearInterval(tick); }, 34);
+    setTimeout(() => { ov.classList.add('out'); setTimeout(() => { ov.remove(); resolve(); }, 400); }, 2200);
+  });
+}
 
 // ===================================================================
 // 結果描画
@@ -212,22 +238,28 @@ function resultHeroHTML(type, score, grade){
   const tags = (type.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('');
   return `
   <section class="result-hero">
-    <p class="announce">YOUR POSTURE TYPE</p>
-    <h2 class="type-name">${type.name}</h2>
-    <p class="type-desc">${type.desc}</p>
-    <div class="tags">${tags}</div>
-    <div class="score-wrap">
-      <div class="dial">
-        <svg width="132" height="132">
-          <circle cx="66" cy="66" r="58" fill="none" stroke="#E7DED2" stroke-width="9"/>
-          <circle cx="66" cy="66" r="58" fill="none" stroke="#B4936A" stroke-width="9"
-            stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${off}"/>
-        </svg>
-        <div class="val"><b>${score}</b><span>SCORE</span></div>
-      </div>
-      <div class="grade">
-        <div class="g-label">${grade.grade}</div>
-        <div class="g-desc">${grade.desc}</div>
+    <div class="rh-visual">
+      <img src="images/result-visual.png" alt="" onerror="this.closest('.rh-visual').classList.add('no-img')">
+      <span class="rh-script">your posture care</span>
+    </div>
+    <div class="rh-body">
+      <p class="announce">YOUR POSTURE TYPE</p>
+      <h2 class="type-name">${type.name}</h2>
+      <p class="type-desc">${type.desc}</p>
+      <div class="tags">${tags}</div>
+      <div class="score-wrap">
+        <div class="dial">
+          <svg width="132" height="132">
+            <circle cx="66" cy="66" r="58" fill="none" stroke="#EFE6DC" stroke-width="9"/>
+            <circle cx="66" cy="66" r="58" fill="none" stroke="#C2A268" stroke-width="9"
+              stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${off}"/>
+          </svg>
+          <div class="val"><b>${score}</b><span>SCORE</span></div>
+        </div>
+        <div class="grade">
+          <div class="g-label">${grade.grade}</div>
+          <div class="g-desc">${grade.desc}</div>
+        </div>
       </div>
     </div>
   </section>`;
